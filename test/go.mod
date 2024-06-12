@@ -12,7 +12,6 @@ replace (
 
 require (
 	github.com/cometbft/cometbft v0.38.7
-	github.com/cstockton/go-conv v1.0.0
 	github.com/docker/go-connections v0.5.0
 	github.com/drhodes/golorem v0.0.0-20220328165741-da82e5b29246
 	github.com/ethereum/go-ethereum v1.14.3
@@ -78,6 +77,7 @@ require (
 	github.com/cosmos/gogoproto v1.4.12 // indirect
 	github.com/cpuguy83/dockercfg v0.3.1 // indirect
 	github.com/crate-crypto/go-kzg-4844 v1.0.0 // indirect
+	github.com/cstockton/go-conv v1.0.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/deckarep/golang-set/v2 v2.1.0 // indirect
 	github.com/decred/dcrd/certgen v1.1.2 // indirect
