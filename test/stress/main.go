@@ -20,6 +20,7 @@ var (
 	host            string
 	gatewayProvider bool
 	key             string
+	quiet           bool
 
 	chainId string
 
@@ -32,13 +33,13 @@ var (
 	fastDropRate       int
 	noDrop             bool
 
-	maxPosters    int
-	postInterval  time.Duration
-	maxContentLen int
+	maxPosters   int
+	postInterval time.Duration
+	contentLen   int
 
 	txPollInterval time.Duration
 
-	sequentialBroadcast bool
+	concurrentBroadcast bool
 	nonceChaos          int
 	rpcTiming           bool
 
@@ -50,8 +51,9 @@ func main() {
 	flag.BoolVar(&gatewayProvider, "gw", false, "gateway provider instead of vanilla provider, "+
 		"need to make sure host is same as gateway's domain")
 	flag.StringVar(&key, "key", "", "existing key to use instead of generating a new one")
+	flag.BoolVar(&quiet, "q", false, "only print errors")
 
-	flag.StringVar(&chainId, "chain", "kwil-test-chain", "chain ID")
+	flag.StringVar(&chainId, "chain", "", "chain ID to require (default is any)")
 
 	flag.DurationVar(&runTime, "run", 30*time.Minute, "terminate after running this long")
 
@@ -65,13 +67,13 @@ func main() {
 	flag.DurationVar(&postInterval, "ei", 10*time.Millisecond,
 		"initiate non-view action execution at this interval (limited by max concurrency setting)")
 	flag.DurationVar(&viewInterval, "vi", -1, "make view action call at this interval")
-	flag.IntVar(&maxContentLen, "el", 50_000, "maximum content length in an executed post action")
+	flag.IntVar(&contentLen, "el", 50_000, "content length in an executed post action")
 
-	flag.BoolVar(&sequentialBroadcast, "sb", false, "sequential broadcast (disallow concurrent broadcast, waiting for broadcast result before releasing nonce lock)")
+	flag.BoolVar(&concurrentBroadcast, "cb", false, "concurrent broadcast (do not wait for broadcast result before releasing nonce lock, will cause nonce errors due to goroutine race)")
 	flag.IntVar(&nonceChaos, "nc", 0, "nonce chaos rate (apply nonce jitter every 1/nc times)")
 	flag.BoolVar(&rpcTiming, "v", false, "print RPC durations")
 
-	flag.DurationVar(&txPollInterval, "pollint", 200*time.Millisecond, "polling interval when waiting for tx confirmation")
+	flag.DurationVar(&txPollInterval, "pollint", 400*time.Millisecond, "polling interval when waiting for tx confirmation")
 
 	flag.Parse()
 
