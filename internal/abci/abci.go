@@ -35,6 +35,7 @@ import (
 
 	abciTypes "github.com/cometbft/cometbft/abci/types"
 	"github.com/cometbft/cometbft/crypto/ed25519"
+	cmtTypes "github.com/cometbft/cometbft/types"
 	"go.uber.org/zap"
 )
 
@@ -64,7 +65,8 @@ func NewAbciApp(ctx context.Context, cfg *AbciConfig, snapshotter SnapshotModule
 		log: log,
 
 		validatorAddressToPubKey: make(map[string][]byte),
-		verifiedTxns:             make(map[chainHash]struct{}),
+		txCache:                  make(map[string]bool),
+		verifiedSigs:             make(map[[32]byte]struct{}),
 	}
 	app.forks.FromMap(cfg.ForkHeights)
 
@@ -252,8 +254,9 @@ type AbciApp struct {
 	// recomputing the hash for all mempool transactions on every TxQuery
 	// request (to mitigate Potential DDOS attack vector).
 	// https://github.com/kwilteam/kwil-db/issues/714
-	verifiedTxnsMtx sync.RWMutex
-	verifiedTxns    map[chainHash]struct{}
+	txCache      map[string]bool
+	txCacheMu    sync.RWMutex
+	verifiedSigs map[[32]byte]struct{}
 
 	// halted is set to true when the network is halted for migration.
 	halted atomic.Bool
@@ -319,6 +322,8 @@ func (a *AbciApp) CheckTx(ctx context.Context, incoming *abciTypes.RequestCheckT
 	var err error
 	code := codeOk
 
+	txHash := sha256.Sum256(incoming.Tx)
+
 	// NOTE about the error logging here: These transactions are from users, so
 	// most of these are not server errors, but client errors, so we ideally do
 	// not want to log them at all in production. We'll keep a few for now to
@@ -355,6 +360,9 @@ func (a *AbciApp) CheckTx(ctx context.Context, incoming *abciTypes.RequestCheckT
 			logger.Debug("failed to verify transaction", zap.Error(err))
 			return &abciTypes.ResponseCheckTx{Code: code.Uint32(), Log: err.Error()}, nil
 		}
+		a.txCacheMu.Lock()
+		a.verifiedSigs[txHash] = struct{}{} // tx.Signature.Signature
+		a.txCacheMu.Unlock()
 	} else {
 		logger.Debug("Recheck", zap.String("sender", hex.EncodeToString(tx.Sender)), zap.Uint64("nonce", tx.Body.Nonce), zap.String("payloadType", tx.Body.PayloadType.String()))
 	}
@@ -380,20 +388,18 @@ func (a *AbciApp) CheckTx(ctx context.Context, incoming *abciTypes.RequestCheckT
 			code = codeUnknownError
 			logger.Warn("unexpected failure to verify transaction against local mempool state", zap.Error(err))
 		}
-		// Evicting transaction from mempool.
-		txHash := sha256.Sum256(incoming.Tx)
-		a.verifiedTxnsMtx.Lock()
-		delete(a.verifiedTxns, txHash)
-		a.verifiedTxnsMtx.Unlock()
+		a.txCacheMu.Lock()
+		delete(a.verifiedSigs, txHash)
+		a.txCacheMu.Unlock()
 		return &abciTypes.ResponseCheckTx{Code: code.Uint32(), Log: err.Error()}, nil
 	}
 
 	// Cache the transaction hash
 	if newTx {
-		txHash := sha256.Sum256(incoming.Tx)
-		a.verifiedTxnsMtx.Lock()
-		a.verifiedTxns[txHash] = struct{}{}
-		a.verifiedTxnsMtx.Unlock()
+		txHash := cmtTypes.Tx(incoming.Tx).Hash()
+		a.txCacheMu.Lock()
+		a.txCache[string(txHash)] = true
+		a.txCacheMu.Unlock()
 	}
 	return &abciTypes.ResponseCheckTx{Code: code.Uint32()}, nil
 }
@@ -501,9 +507,11 @@ func (a *AbciApp) FinalizeBlock(ctx context.Context, req *abciTypes.RequestFinal
 		res.TxResults = append(res.TxResults, abciRes)
 
 		// Remove the transaction from the cache as it has been included in a block
-		a.verifiedTxnsMtx.Lock()
-		delete(a.verifiedTxns, txHash)
-		a.verifiedTxnsMtx.Unlock()
+		// hash := cmtTypes.Tx(tx).Hash()
+		a.txCacheMu.Lock()
+		delete(a.txCache, string(txHash[:]))
+		delete(a.verifiedSigs, txHash)
+		a.txCacheMu.Unlock()
 	}
 
 	// If at activation height, submit any consensus params updates associated
@@ -1219,13 +1227,16 @@ func (a *AbciApp) validateProposalTransactions(ctx context.Context, txns [][]byt
 
 			// This block proposal may include transactions that did not pass
 			// through our mempool, so we have to verify all signatures.
-			if !a.TxSigVerified(txO.hash) {
+			a.txCacheMu.Lock()
+			if _, have := a.verifiedSigs[txO.hash]; have {
+				// bytes.Equal(knownSig, tx.Signature.Signature)
+			} else {
 				if err = ident.VerifyTransaction(tx); err != nil {
+					a.txCacheMu.Unlock()
 					return fmt.Errorf("transaction signature verification failed: %w", err)
 				}
-				// We won't bother to insert this hash into the map since it is
-				// very likely that this transaction is about to be executed.
 			}
+			a.txCacheMu.Unlock()
 		}
 	}
 	return nil
@@ -1313,19 +1324,16 @@ func (a *AbciApp) SetEventBroadcaster(fn EventBroadcaster) {
 }
 
 // TxSigVerified indicates if ABCI has verified this unconfirmed transaction's
-// signature. This also returns false if the transaction is not in mempool. This
-// logic is not broadly applicable, but since the tx hash is computed over the
-// entire serialized transaction including the signature, the same hash implies
-// the same signature.
-func (a *AbciApp) TxSigVerified(txHash chainHash) bool {
-	a.verifiedTxnsMtx.Lock()
-	defer a.verifiedTxnsMtx.Unlock()
-	_, ok := a.verifiedTxns[txHash]
+// signature. This logic is not broadly applicable, but since the tx hash is
+// computed over the entire serialized transaction including the signature, the
+// same hash implies the same signature.
+func (a *AbciApp) TxSigVerified(txHash [32]byte) bool {
+	a.txCacheMu.Lock()
+	defer a.txCacheMu.Unlock()
+	_, ok := a.verifiedSigs[txHash]
 	return ok
 }
 
-// TxInMempool wraps TxSigVerified for callers that require a slice to check if
-// a transaction is (still) in mempool.
 func (a *AbciApp) TxInMempool(txHash []byte) bool {
 	if len(txHash) != 32 {
 		return false
