@@ -100,6 +100,12 @@ func (s *StateSyncService) DiscoverSnapshots(ctx context.Context) (int64, error)
 // If a snapshot is deemed invalid by any of the trusted providers, it is blacklisted and the next best snapshot is selected.
 func (s *StateSyncService) downloadSnapshot(ctx context.Context) (synced bool, snap *snapshotMetadata, err error) {
 	for {
+		select {
+		case <-ctx.Done():
+			return false, nil, ctx.Err()
+		default:
+		}
+
 		// select the best snapshot and request chunks
 		bestSnapshot, err := s.bestSnapshot()
 		if err != nil {
@@ -147,35 +153,67 @@ func (s *StateSyncService) chunkFetcher(ctx context.Context, snapshot *snapshotM
 		providers = append(providers, s.snapshotPool.getPeers()...)
 	}
 
+	const chunkFetchers = 10 // limit the number of concurrent chunk fetches
+
 	errChan := make(chan error, snapshot.Chunks)
+	tasks := make(chan uint32, snapshot.Chunks) // channel to send tasks to chunk fetchers
+
 	chunkCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	for i := range snapshot.Chunks {
+	// start chunk fetchers
+	for i := 0; i < chunkFetchers; i++ {
 		wg.Add(1)
-		go func(idx uint32) {
-			defer wg.Done()
-			for _, provider := range providers {
+		go func() {
+			defer func() {
+				s.log.Info("Chunk fetcher exiting ", i)
+				wg.Done()
+			}()
+
+			for chunkIdx := range tasks {
+				// s.log.Info("Requesting snapshot chunk", "height", snapshot.Height, "index", chunkIdx)
+				success := true
+				for _, provider := range providers {
+					select {
+					case <-chunkCtx.Done():
+						// Exit early if the context is cancelled
+						return
+					default:
+					}
+					if err := s.requestSnapshotChunk(chunkCtx, snapshot, provider, chunkIdx); err != nil {
+						s.log.Warn("failed to request snapshot chunk %d from peer %s: %v", chunkIdx, provider.ID, err)
+						continue
+					}
+					// successfully fetched the chunk
+					s.log.Info("Received snapshot chunk", "height", snapshot.Height, "index", chunkIdx, "provider", provider.ID)
+					success = true
+					break // Move to next chunk after successful fetch
+				}
+
+				if success {
+					continue // Move to next chunk after successful fetch
+				}
+
+				// failed to fetch the chunk from all providers
 				select {
-				case <-chunkCtx.Done():
+				case errChan <- fmt.Errorf("failed to fetch snapshot chunk index %d", chunkIdx):
+					cancel()
+					s.log.Infof("Chunk fetcher %d exiting, failed to fetch chunk index %d", i, chunkIdx)
 					// Exit early if the context is cancelled
 					return
 				default:
 				}
-				if err := s.requestSnapshotChunk(chunkCtx, snapshot, provider, idx); err != nil {
-					s.log.Warn("failed to request snapshot chunk %d from peer %s: %v", idx, provider.ID, err)
-					continue
-				}
-				// successfully fetched the chunk
-				s.log.Info("Received snapshot chunk", "height", snapshot.Height, "index", idx, "provider", provider.ID)
-				return
 			}
-			// failed to fetch the chunk from all providers
-			errChan <- fmt.Errorf("failed to fetch snapshot chunk index %d", idx)
-			cancel()
-		}(i)
+			s.log.Info("Chunk fetcher exiting ", i)
+		}()
 	}
 
+	// send chunk indexes to chunk fetchers
+	for chunk := range snapshot.Chunks {
+		// s.log.Info("Adding snapshot chunk request task: ", "height", snapshot.Height, "index", i)
+		tasks <- chunk
+	}
+	close(tasks) // close the tasks channel to signal the end of chunks
 	wg.Wait()
 
 	// check if any of the chunk fetches failed
