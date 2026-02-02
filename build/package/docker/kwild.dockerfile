@@ -19,7 +19,7 @@ RUN GOWORK=off GIT_VERSION=$version GIT_COMMIT=$git_commit BUILD_TIME=$build_tim
 RUN GOWORK=off GIT_VERSION=$version GIT_COMMIT=$git_commit BUILD_TIME=$build_time CGO_ENABLED=0 TARGET="/app/dist" GO_RACEFLAG=$go_race ./scripts/build/binary kwil-cli
 RUN chmod +x /app/dist/kwild /app/dist/kwil-admin /app/dist/kwil-cli
 
-FROM alpine:3.19
+FROM alpine:3.23.3
 WORKDIR /app
 RUN mkdir -p /var/run/kwil && chmod 777 /var/run/kwil 
 RUN apk --no-cache add postgresql-client
